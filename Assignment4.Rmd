@@ -1,0 +1,298 @@
+---
+title: "Assignment 4"
+author: "Salma Kinawi"
+date: "2025-09-24"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+
+
+```{r}
+#download libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(e1071)
+library(tree)
+library(rpart)
+library(gbm)
+library(randomForest)
+```
+
+
+```{r}
+#import data
+data_unedited<-read_csv("Cohen_CANCERSEEK_liquid_biopsy_2018_modified.csv")
+
+#inspect the data
+head(data_unedited)
+str(data_unedited)
+names(data_unedited)
+summary(data_unedited)
+```
+
+```{r}
+
+#turn tumor type into a factor
+data_unedited$Tumor_type<-as.factor(data_unedited$Tumor_type)
+
+#convert the protein columns to become numeric 
+data_unedited[, 4:42] <- data.frame(lapply(data_unedited[, 4:42], as.numeric))
+
+```
+
+```{r}
+#check for missing values
+missing_values<-data.frame(
+  Variables=names(data_unedited), 
+  Missing=colSums(is.na(data_unedited))
+)
+missing_values
+```
+
+```{r}
+#apply median imputation to missing values 
+
+#create a function called impute that will swap an input from the current dataset and replace it with the median of that column only if the vlaue is NA, median is calculated excluding NAs
+impute <- function(d) {
+  d %>% mutate(across(where(is.numeric),
+                       ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+}  
+
+#apply function to dataset
+data_imputed<-impute(data_unedited)
+
+# Check if missing values are gone
+colSums(is.na(data_imputed))
+
+```
+
+The preprocessing steps applied to the dataset included converting the Tumor_type column into a factor variable, ensuring that all protein concentration columns were stored as numeric values, and addressing missing data through median imputation. Normalization was not performed, as it is unnecessary for Random Forest models. Unlike distance-based algorithms, Random Forests construct decision trees using threshold splits within each feature independently, making them robust to differences in measurement units or scales across variables.
+
+```{r}
+#check dimensions
+nrow(data_imputed)
+ncol(data_imputed)
+
+#Tumor type counts
+table(data_imputed$Tumor_type)
+
+#find how much are not normal
+non_normal<-sum((data_imputed$Tumor_type !="Normal"))
+non_normal
+
+
+```
+
+The dataset consists of 1804 rows and 42 columns. A summary of the Tumor_type variable shows that there are 800 normal samples, and by applying the sum() function we determined that there are 1004 tumor samples distributed across various cancer types representing different body parts and organs.
+
+```{r}
+#make new column sorting into odd or even
+data_imputed$split <- ifelse(seq_len(nrow(data_imputed)) %% 2==1, "Train", "Test")
+
+#view new column, split 
+head(data_imputed)
+
+#split into two datasets
+
+train<-subset(data_imputed, split=="Train")
+
+test<-subset(data_imputed, split=="Test")
+
+#remove non predictor columns
+train<- subset(train, select = -c(Patient_ID, Sample_ID,split))
+test <- subset(test,  select = -c(Patient_ID, Sample_ID, split))
+
+
+head(train)
+head(test)
+```
+
+```{r}
+# Make decision tree model
+treemodel <- tree(Tumor_type ~ ., data = train)
+summary(treemodel)
+plot(treemodel)
+text(treemodel, cex=0.7, adj=0)
+```
+```{r}
+#find the most influential protein feature
+head(treemodel$frame[, c("var","n","dev","yval")]) #looking at what the frame of the tree model looks like
+
+#find the most influential protein
+influential<- treemodel$frame$var[1]
+influential
+```
+
+```{r}
+#predictions using the test dataset 
+predictions<- predict(treemodel, test, type = "class")
+
+#make a confusion matrix
+matrix<-table(predicted=predictions, actual=test$Tumor_type)
+matrix 
+
+#find the misclassifcation rate
+misclass<-mean(predictions !=test$Tumor_type)
+misclass
+
+
+```
+This analysis shows that the decision tree had a misclassification error rate of 0.3725, meaning that approximately 37.3% of the test samples were misclassified. The model performed well in predicting Normal, Colorectum, Breast, and Pancreas samples. However, it struggled with several cancer types: Esophagus and Liver were never correctly classified, while Ovary and Lung showed relatively poor prediction accuracy, with many samples misclassified into other categories.
+
+Part 3:
+
+
+```{r}
+TrainModel<-train
+TestModel<-test
+
+names(TrainModel) <- make.names(names(TrainModel), unique = TRUE)
+names(TestModel)  <- make.names(names(TestModel),  unique = TRUE)
+
+#make results reproducible
+set.seed(53)
+
+#number of protein predictors minus the response Tumor_type
+protein<-ncol(train)-1 
+
+randomf_model <- randomForest(Tumor_type ~ .,data = train,ntree = 500,
+ mtry  = floor(sqrt(protein)),   # good default; you had 6, either is fine
+  importance = TRUE
+)
+randomf_model 
+```
+```{r}
+#predit class lables on the test set
+rf_pred<-predict(randomf_model, newdata = test)
+
+#create confusion matrix
+conf_matrix<-table(predicted=rf_pred, actual=test$Tumor_type)
+conf_matrix
+
+#miclassification error rate
+m_error <-mean(rf_pred !=test$Tumor_type)
+m_error
+```
+
+```{r}
+# Variable importance values
+imp<-importance(randomf_model)
+imp
+#importance plot
+df_imp <- data.frame(
+  Feature = rownames(imp),
+  Score   = imp[, "MeanDecreaseAccuracy"]
+)
+#order by score
+df_imp <- df_imp[order(df_imp$Score), ]
+tail(df_imp, 10)
+
+
+#use the top 10 features since it is really crowded
+df_subset<- tail(df_imp, 10)
+
+#make barplot
+barplot(
+  df_subset$Score,
+  names.arg = df_subset$Feature,
+  las = 2,                      
+  cex.names = 0.7, 
+  col = "grey",
+        main = paste("Top 10 Protein Importances"),
+        ylab = "Mean Decrease Accuracy")
+
+```
+From the importance table, IL-8 has the highest Mean Decrease in Accuracy (28.98), making it the most influential protein for classifying tumor type.
+
+```{r}
+#cancer vs normal
+train$binary <- ifelse(train$Tumor_type =="Normal", "Normal", "Cancer")
+test$binary <-ifelse(test$Tumor_type=="Normal", "Normal", "Cancer")
+
+#turn into a factor
+train$binary <- factor(train$binary, levels = c("Normal","Cancer"))
+test$binary  <- factor(test$binary,  levels = c("Normal","Cancer"))
+
+table(train$binary); table(test$binary)
+
+```
+```{r}
+set.seed(443)
+pro<-ncol(train) - 2
+
+rf_binary <- randomForest(
+  binary ~ . - Tumor_type,
+  data = train,
+  ntree = 500,
+  mtry  = floor(sqrt(pro)),
+  importance = TRUE
+)
+rf_binary
+```
+```{r}
+#predict on test dataset
+pred<-predict(rf_binary, newdata = test, type="class")
+#confusions matrix
+cof_matrix<- table(predicted = pred, 
+                   actual=test$binary)
+cof_matrix
+
+#missclassification rate
+missclass<-mean(pred !=test$binary)
+accuracy<-1-missclass #overall accuracy
+
+accuracy
+missclass
+
+```
+```{r}
+#cohen's Kappa
+total<- sum(cof_matrix)
+pe<-sum(rowSums(cof_matrix) * colSums(cof_matrix)) / (total^2)
+kappa <- (accuracy - pe) / (1 - pe)
+kappa
+
+```
+
+```{r}
+#importance
+imp_binary<-importance(rf_binary)
+
+#convert into a data frame
+df_imp_binary <- data.frame(
+  feature = rownames(imp_binary),
+  score   = imp_binary[, "MeanDecreaseAccuracy"],
+  row.names = NULL
+)
+
+# Sort by importance
+df_imp_binary <- df_imp_binary[order(df_imp_binary$score), ]
+df_subset <- tail(df_imp_binary, 10) # Take top 10
+
+
+scores   <- as.numeric(df_subset$score)
+features <- as.character(df_subset$feature)
+
+barplot(
+  height = scores,
+  names.arg = features,
+  las = 2,
+  cex.names = 0.7,
+  col = "purple",
+  main = "Top 10 Protein Importances (Binary)",
+  ylab = "Mean Decrease Accuracy"
+)
+
+#top two 
+df_imp_binary$feature[order(df_imp_binary$score, decreasing = TRUE)[1:2]]
+```
+3. The two most influential proteins identified were IL-8 and IL-6.
+
+4. A biological explanation for this finding is that IL-8 is a pro-inflammatory chemokine that promotes the formation of new blood vessels (angiogenesis) and is often elevated in cancer patients, supporting tumor growth and metastasis. IL-6 is a cytokine with key roles in inflammation and immune regulation, and it is commonly associated with cancer-related inflammation and tumor progression. Together, these markers explain why IL-8 and IL-6 strongly discriminate between cancer and normal blood samples.
+
+5. In terms of model usefulness, the binary random forest achieved a misclassification rate of 5.7%, an accuracy of 94%, and a Cohen’s kappa of 0.88, indicating strong agreement beyond chance. These results demonstrate that the binary model performs very well in distinguishing between cancer and normal samples, suggesting its potential value for detecting cancer in blood samples using this protein panel.
+```
